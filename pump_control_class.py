@@ -30,7 +30,7 @@ class PumpController:
     COMM_RS485 = 1
     COMM_IO = 0
     
-    def __init__(self, port='/dev/ttyUSB0', baudrate=9600, unit_id=1, max_rpm=600):
+    def __init__(self, port='/dev/ttyUSB0', baudrate=9600, unit_id=1, max_rpm=600, client=None):
         """
         Initialize the pump controller.
         
@@ -44,9 +44,9 @@ class PumpController:
         self.baudrate = baudrate
         self.unit_id = unit_id
         self.max_rpm = max_rpm
-        self.client = None
+        self.client = client
         self.connected = False
-    
+
     def connect(self):
         """
         Establish connection to the pump via Modbus RTU.
@@ -79,6 +79,11 @@ class PumpController:
         except Exception as e:
             print(f"Connection error: {e}")
             return False
+    
+    def set_client(self, client):
+        self.client = client
+        self.connected = True
+        self._initialize_pump()
     
     def _initialize_pump(self):
         """Initialize pump with default settings."""
@@ -193,7 +198,7 @@ class PumpController:
                     False, 
                     unit=self.unit_id
                 )
-                print("Pump stopped (emergency stop)")
+                print("Pump stopped")
             except Exception as e:
                 print(f"Error stopping pump: {e}")
     
@@ -253,6 +258,7 @@ class SimulatedPumpController:
         self.is_running = False
         self.direction = 'CW'
         self.start_time = None
+        self.client = None
     
     def connect(self):
         """
@@ -264,6 +270,10 @@ class SimulatedPumpController:
         self.connected = True
         print(f"[SIMULATED] Connected to pump on {self.port} (Unit ID: {self.unit_id})")
         return True
+    
+    def set_client(self, client):
+        self.client = client
+        self.connected = True
     
     def run(self, rpm, duration=None, reverse=False):
         """
