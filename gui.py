@@ -54,9 +54,9 @@ class PumpControlGUI(QWidget):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    pump_dispenser = SimulatedPumpController(port='/dev/ttyUSB0', baudrate=9600, unit_id=1, max_rpm=600)
+    pump_dispenser = PumpController(port='/dev/ttyUSB0', baudrate=9600, unit_id=1, max_rpm=600)
     pump_dispenser.connect()
-    pump_retractor = SimulatedPumpController(port='/dev/ttyUSB0', baudrate=9600, unit_id=2, max_rpm=600)
+    pump_retractor = PumpController(port='/dev/ttyUSB0', baudrate=9600, unit_id=2, max_rpm=600)
     pump_retractor.set_client(pump_dispenser.client)
     window = PumpControlGUI(pump_dispenser, pump_retractor)
     window.show()
