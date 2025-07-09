@@ -1,12 +1,13 @@
 from pymodbus.client.sync import ModbusSerialClient as ModbusClient
 import time
+import serial.tools.list_ports
 
 class PumpController:
     """
     A class to control pumps via Modbus RTU communication.
     
     Attributes:
-        port (str): Serial port for communication (e.g., '/dev/ttyUSB0')
+        sn (str): Serial number of the pump
         baudrate (int): Baud rate for serial communication
         unit_id (int): Modbus slave address (check DIP switches on pump)
         max_rpm (int): Maximum allowed RPM for the pump
@@ -30,22 +31,35 @@ class PumpController:
     COMM_RS485 = 1
     COMM_IO = 0
     
-    def __init__(self, port='/dev/ttyUSB0', baudrate=9600, unit_id=1, max_rpm=600, client=None):
+    def __init__(self, sn, baudrate=9600, unit_id=1, max_rpm=600):
         """
         Initialize the pump controller.
         
         Args:
-            port (str): Serial port for communication
+            sn (str): Serial number of the pump
             baudrate (int): Baud rate for serial communication
             unit_id (int): Modbus slave address
             max_rpm (int): Maximum allowed RPM for the pump
         """
-        self.port = port
+        self.sn = sn
         self.baudrate = baudrate
         self.unit_id = unit_id
         self.max_rpm = max_rpm
-        self.client = client
+        self.client = None
         self.connected = False
+
+    @staticmethod
+    def _find_port_by_sn(sn):
+        """
+        Find the port of the pump by its serial number.
+        
+        Args:
+            sn (str): Serial number of the pump
+        """
+        for port in serial.tools.list_ports.comports():
+            if sn in port.description:
+                return port.device
+        return None
 
     def connect(self):
         """
@@ -57,7 +71,7 @@ class PumpController:
         try:
             self.client = ModbusClient(
                 method='rtu',
-                port=self.port,
+                port=PumpController._find_port_by_sn(self.sn),
                 baudrate=self.baudrate,
                 stopbits=1,
                 bytesize=8,
@@ -67,13 +81,13 @@ class PumpController:
             
             if self.client.connect():
                 self.connected = True
-                print(f"Connected to pump on {self.port} (Unit ID: {self.unit_id})")
+                print(f"Connected to pump {self.sn} (Unit ID: {self.unit_id})")
                 
                 # Initialize pump settings
                 self._initialize_pump()
                 return True
             else:
-                print(f"Failed to connect to pump on {self.port}")
+                print(f"Failed to connect to pump {self.sn}")
                 return False
                 
         except Exception as e:
@@ -239,7 +253,7 @@ class SimulatedPumpController:
         direction (str): Current direction ('CW' or 'CCW')
     """
     
-    def __init__(self, port='/dev/ttyUSB0', baudrate=9600, unit_id=1, max_rpm=600):
+    def __init__(self, sn, baudrate=9600, unit_id=1, max_rpm=600):
         """
         Initialize the simulated pump controller.
         
@@ -249,7 +263,7 @@ class SimulatedPumpController:
             unit_id (int): Simulated Modbus slave address
             max_rpm (int): Maximum allowed RPM for the simulated pump
         """
-        self.port = port
+        self.sn = sn
         self.baudrate = baudrate
         self.unit_id = unit_id
         self.max_rpm = max_rpm
@@ -268,7 +282,7 @@ class SimulatedPumpController:
             bool: Always True for simulation
         """
         self.connected = True
-        print(f"[SIMULATED] Connected to pump on {self.port} (Unit ID: {self.unit_id})")
+        print(f"[SIMULATED] Connected to pump on {self.sn} (Unit ID: {self.unit_id})")
         return True
     
     def set_client(self, client):
@@ -353,7 +367,7 @@ class SimulatedPumpController:
             'direction': self.direction,
             'max_rpm': self.max_rpm,
             'runtime_seconds': runtime,
-            'port': self.port,
+            'sn': self.sn,
             'unit_id': self.unit_id
         }
     
