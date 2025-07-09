@@ -57,7 +57,7 @@ class PumpController:
             sn (str): Serial number of the pump
         """
         for port in serial.tools.list_ports.comports():
-            if sn in port.description:
+            if sn == port.serial_number:
                 return port.device
         return None
 
