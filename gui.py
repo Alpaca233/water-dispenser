@@ -11,8 +11,11 @@ from PyQt5.QtWidgets import (
     QProgressBar,
     QLabel,
     QGroupBox,
+    QSpinBox,
+    QTimeEdit,
+    QFormLayout,
 )
-from PyQt5.QtCore import QTimer, QThread, pyqtSignal
+from PyQt5.QtCore import QTimer, QThread, pyqtSignal, QTime, QDateTime
 from pymodbus.client.sync import ModbusSerialClient as ModbusClient
 
 from pump_control_class import PumpController, SimulatedPumpController
@@ -24,12 +27,20 @@ class PumpOperationThread(QThread):
     operation_completed = pyqtSignal(str, bool)  # operation_name, success
     progress_update = pyqtSignal(int, int)  # current_time, total_time
 
-    def __init__(self, pump_dispenser, pump_retractor, operation_name, config):
+    def __init__(
+        self,
+        pump_dispenser,
+        pump_retractor,
+        operation_name,
+        config,
+        custom_duration=None,
+    ):
         super().__init__()
         self.pump_dispenser = pump_dispenser
         self.pump_retractor = pump_retractor
         self.operation_name = operation_name
         self.config = config
+        self.custom_duration = custom_duration
         self.is_running = False
 
     def run_fill(self):
@@ -78,7 +89,12 @@ class PumpOperationThread(QThread):
         dispenser_rpm = self.config.getint(
             "operation_settings", "dispense_dispenser_rpm"
         )
-        duration = self.config.getint("operation_settings", "dispense_duration")
+        # Use custom duration if provided, otherwise use config value
+        duration = (
+            self.custom_duration
+            if self.custom_duration is not None
+            else self.config.getint("operation_settings", "dispense_duration")
+        )
         sleep_time = self.config.getint("operation_settings", "operation_sleep")
 
         total_time = duration + sleep_time
@@ -174,10 +190,19 @@ class PumpControlGUI(QWidget):
         self.operation_thread = None
         self.stop_timer = None
 
+        # Scheduled dispensing variables
+        self.scheduled_dispense_active = False
+        self.scheduled_timer = QTimer()
+        self.countdown_timer = QTimer()
+        self.next_dispense_time = None
+        self.dispense_interval_minutes = 0
+        self.dispense_duration_seconds = 0
+
         self.setWindowTitle("Pump Control")
-        self.setGeometry(100, 100, 400, 300)
+        self.setGeometry(100, 100, 500, 600)
 
         self.setup_ui()
+        self.setup_scheduled_dispensing()
 
     def setup_ui(self):
         """Setup the user interface."""
@@ -223,13 +248,212 @@ class PumpControlGUI(QWidget):
         progress_layout.addWidget(self.status_label)
         progress_group.setLayout(progress_layout)
 
+        # Create scheduled dispensing group
+        scheduled_group = QGroupBox("Scheduled Dispensing")
+        scheduled_layout = QVBoxLayout()
+
+        # Form layout for settings
+        settings_layout = QFormLayout()
+
+        # Dispense interval (minutes)
+        self.interval_spinbox = QSpinBox()
+        self.interval_spinbox.setRange(1, 1440)  # 1 minute to 24 hours
+        self.interval_spinbox.setValue(30)  # Default 30 minutes
+        self.interval_spinbox.setSuffix(" minutes")
+        settings_layout.addRow("Dispense Interval:", self.interval_spinbox)
+
+        # Dispense time (duration in seconds)
+        self.duration_spinbox = QSpinBox()
+        self.duration_spinbox.setRange(1, 300)  # 1 second to 5 minutes
+        self.duration_spinbox.setValue(5)  # Default 5 seconds
+        self.duration_spinbox.setSuffix(" seconds")
+        settings_layout.addRow("Dispense Duration:", self.duration_spinbox)
+
+        settings_layout.addRow("", QLabel(""))  # Spacer
+
+        # Control buttons
+        button_layout = QHBoxLayout()
+        self.start_scheduled_button = QPushButton("Start Scheduled Dispensing")
+        self.stop_scheduled_button = QPushButton("Stop Scheduled Dispensing")
+        self.stop_scheduled_button.setEnabled(False)
+
+        button_layout.addWidget(self.start_scheduled_button)
+        button_layout.addWidget(self.stop_scheduled_button)
+
+        # Status labels
+        self.scheduled_status_label = QLabel("Scheduled dispensing: Inactive")
+        self.next_dispense_label = QLabel("Next dispense: Not scheduled")
+        self.countdown_label_scheduled = QLabel("")
+
+        # Connect buttons
+        self.start_scheduled_button.clicked.connect(self.start_scheduled_dispensing)
+        self.stop_scheduled_button.clicked.connect(self.stop_scheduled_dispensing)
+
+        scheduled_layout.addLayout(settings_layout)
+        scheduled_layout.addLayout(button_layout)
+        scheduled_layout.addWidget(self.scheduled_status_label)
+        scheduled_layout.addWidget(self.next_dispense_label)
+        scheduled_layout.addWidget(self.countdown_label_scheduled)
+        scheduled_group.setLayout(scheduled_layout)
+
         # Add groups to main layout
         main_layout.addWidget(buttons_group)
         main_layout.addWidget(progress_group)
+        main_layout.addWidget(scheduled_group)
 
         self.setLayout(main_layout)
 
-    def start_operation(self, operation_name):
+    def setup_scheduled_dispensing(self):
+        """Setup scheduled dispensing timers and connections."""
+        # Connect scheduled timer to dispense function
+        self.scheduled_timer.timeout.connect(self.execute_scheduled_dispense)
+
+        # Connect countdown timer to update countdown display
+        self.countdown_timer.timeout.connect(self.update_countdown)
+        self.countdown_timer.start(1000)  # Update every second
+
+        # Load settings from config
+        self.load_scheduled_settings()
+
+    def load_scheduled_settings(self):
+        """Load scheduled dispensing settings from config."""
+        try:
+            # Load from config if available, otherwise use defaults
+            interval = self.config.getint(
+                "scheduled_settings", "default_interval_minutes", fallback=30
+            )
+            duration = self.config.getint(
+                "scheduled_settings", "default_duration_seconds", fallback=5
+            )
+
+            self.interval_spinbox.setValue(interval)
+            self.duration_spinbox.setValue(duration)
+        except:
+            # Use defaults if config section doesn't exist
+            pass
+
+    def start_scheduled_dispensing(self):
+        """Start scheduled dispensing."""
+        if self.current_operation is not None:
+            self.status_label.setText(
+                "Cannot start scheduled dispensing - another operation is running!"
+            )
+            return
+
+        if self.scheduled_dispense_active:
+            self.status_label.setText("Scheduled dispensing is already active!")
+            return
+
+        # Get settings from UI
+        self.dispense_interval_minutes = self.interval_spinbox.value()
+        self.dispense_duration_seconds = self.duration_spinbox.value()
+
+        # Calculate next dispense time
+        self.next_dispense_time = QDateTime.currentDateTime().addSecs(
+            self.dispense_interval_minutes * 60
+        )
+
+        # Start the scheduled timer
+        interval_ms = (
+            self.dispense_interval_minutes * 60 * 1000
+        )  # Convert to milliseconds
+        self.scheduled_timer.start(interval_ms)
+
+        # Update UI state
+        self.scheduled_dispense_active = True
+        self.scheduled_status_label.setText("Scheduled dispensing: Active")
+        self.start_scheduled_button.setEnabled(False)
+        self.stop_scheduled_button.setEnabled(True)
+
+        # Disable settings controls
+        self.interval_spinbox.setEnabled(False)
+        self.duration_spinbox.setEnabled(False)
+
+        # Disable other operation buttons
+        self.fill_button.setEnabled(False)
+        self.retract_button.setEnabled(False)
+
+        self.status_label.setText(
+            f"Scheduled dispensing started - interval: {self.dispense_interval_minutes} minutes"
+        )
+        self.update_next_dispense_display()
+
+    def stop_scheduled_dispensing(self):
+        """Stop scheduled dispensing."""
+        if not self.scheduled_dispense_active:
+            return
+
+        # Stop timers
+        self.scheduled_timer.stop()
+
+        # Update UI state
+        self.scheduled_dispense_active = False
+        self.scheduled_status_label.setText("Scheduled dispensing: Inactive")
+        self.start_scheduled_button.setEnabled(True)
+        self.stop_scheduled_button.setEnabled(False)
+
+        # Re-enable settings controls
+        self.interval_spinbox.setEnabled(True)
+        self.duration_spinbox.setEnabled(True)
+
+        # Re-enable other operation buttons
+        self.fill_button.setEnabled(True)
+        self.retract_button.setEnabled(True)
+
+        # Clear displays
+        self.next_dispense_label.setText("Next dispense: Not scheduled")
+        self.countdown_label_scheduled.setText("")
+
+        self.status_label.setText("Scheduled dispensing stopped")
+
+    def execute_scheduled_dispense(self):
+        """Execute a scheduled dispense operation."""
+        if not self.scheduled_dispense_active:
+            return
+
+        # Start dispense operation with custom duration
+        self.start_operation("Dispense", custom_duration=self.dispense_duration_seconds)
+
+        # Schedule next dispense
+        self.next_dispense_time = QDateTime.currentDateTime().addSecs(
+            self.dispense_interval_minutes * 60
+        )
+        self.update_next_dispense_display()
+
+    def update_countdown(self):
+        """Update countdown display for next scheduled dispense."""
+        if not self.scheduled_dispense_active or self.next_dispense_time is None:
+            self.countdown_label_scheduled.setText("")
+            return
+
+        current_time = QDateTime.currentDateTime()
+        time_until_dispense = current_time.secsTo(self.next_dispense_time)
+
+        if time_until_dispense > 0:
+            hours = time_until_dispense // 3600
+            minutes = (time_until_dispense % 3600) // 60
+            seconds = time_until_dispense % 60
+
+            if hours > 0:
+                countdown_text = (
+                    f"Next dispense in: {hours:02d}:{minutes:02d}:{seconds:02d}"
+                )
+            else:
+                countdown_text = f"Next dispense in: {minutes:02d}:{seconds:02d}"
+
+            self.countdown_label_scheduled.setText(countdown_text)
+        else:
+            self.countdown_label_scheduled.setText("Dispensing now...")
+
+    def update_next_dispense_display(self):
+        """Update the next dispense time display."""
+        if self.next_dispense_time is not None:
+            time_str = self.next_dispense_time.toString("yyyy-MM-dd hh:mm:ss")
+            self.next_dispense_label.setText(f"Next dispense: {time_str}")
+        else:
+            self.next_dispense_label.setText("Next dispense: Not scheduled")
+
+    def start_operation(self, operation_name, custom_duration=None):
         """Start a pump operation in a separate thread."""
         if self.current_operation is not None:
             self.status_label.setText("Another operation is already running!")
@@ -247,9 +471,17 @@ class PumpControlGUI(QWidget):
         self.retract_button.setEnabled(False)
         self.stop_button.setEnabled(True)
 
+        # Disable scheduled dispensing controls during operation
+        self.start_scheduled_button.setEnabled(False)
+        self.stop_scheduled_button.setEnabled(False)
+
         # Create and start operation thread
         self.operation_thread = PumpOperationThread(
-            self.pump_dispenser, self.pump_retractor, operation_name, self.config
+            self.pump_dispenser,
+            self.pump_retractor,
+            operation_name,
+            self.config,
+            custom_duration,
         )
         self.operation_thread.operation_completed.connect(self.operation_finished)
         self.operation_thread.progress_update.connect(self.update_progress)
@@ -292,10 +524,23 @@ class PumpControlGUI(QWidget):
         self.progress_bar.setValue(100)
         self.countdown_label.setText("")
 
-        # Re-enable operation buttons, disable stop button
-        self.fill_button.setEnabled(True)
-        self.dispense_button.setEnabled(True)
-        self.retract_button.setEnabled(True)
+        # Re-enable operation buttons based on scheduled dispensing state
+        if self.scheduled_dispense_active:
+            # During scheduled dispensing, keep Fill and Drain disabled
+            self.fill_button.setEnabled(False)
+            self.dispense_button.setEnabled(True)  # Allow manual dispense
+            self.retract_button.setEnabled(False)
+            self.stop_scheduled_button.setEnabled(True)
+            # Keep start button disabled and settings disabled during scheduled dispensing
+        else:
+            # No scheduled dispensing active, enable all operation buttons
+            self.fill_button.setEnabled(True)
+            self.dispense_button.setEnabled(True)
+            self.retract_button.setEnabled(True)
+            self.start_scheduled_button.setEnabled(True)
+            self.stop_scheduled_button.setEnabled(False)
+
+        # Always disable stop button when operation finishes
         self.stop_button.setEnabled(False)
 
     def stop_operation(self):
@@ -340,10 +585,19 @@ class PumpControlGUI(QWidget):
 
     def closeEvent(self, event):
         """Handle GUI close event to ensure proper cleanup."""
+        # Stop scheduled dispensing
+        if self.scheduled_dispense_active:
+            self.stop_scheduled_dispensing()
+
+        # Stop any running operation
         if self.operation_thread is not None and self.operation_thread.isRunning():
             self.stop_operation()
             # Give the thread a moment to stop
             self.operation_thread.wait(3000)  # Wait up to 3 seconds
+
+        # Stop timers
+        self.scheduled_timer.stop()
+        self.countdown_timer.stop()
 
         # Ensure pumps are stopped
         self.pump_dispenser.stop()
