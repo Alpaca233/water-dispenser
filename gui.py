@@ -157,7 +157,10 @@ class PumpOperationThread(QThread):
     def stop_operation(self):
         """Stop the current operation."""
         self.is_running = False
-        self.wait()  # Wait for thread to finish
+        # Immediately stop both pumps
+        self.pump_dispenser.stop()
+        self.pump_retractor.stop()
+        # Don't call self.wait() here as it blocks the GUI thread
 
 
 class PumpControlGUI(QWidget):
@@ -169,6 +172,7 @@ class PumpControlGUI(QWidget):
         self.config = config
         self.current_operation = None
         self.operation_thread = None
+        self.stop_timer = None
 
         self.setWindowTitle("Pump Control")
         self.setGeometry(100, 100, 400, 300)
@@ -265,8 +269,18 @@ class PumpControlGUI(QWidget):
 
     def operation_finished(self, operation_name, success):
         """Handle operation completion."""
+        # Cancel stop timer if running
+        if self.stop_timer is not None:
+            self.stop_timer.stop()
+            self.stop_timer = None
+
+        # Clean up thread
+        if self.operation_thread is not None:
+            self.operation_thread.quit()
+            self.operation_thread.wait()  # Wait for thread to finish
+            self.operation_thread = None
+
         self.current_operation = None
-        self.operation_thread = None
 
         if success:
             self.status_label.setText(f"{operation_name} completed successfully")
@@ -286,9 +300,31 @@ class PumpControlGUI(QWidget):
 
     def stop_operation(self):
         """Stop the current operation."""
-        if self.operation_thread is not None:
+        if self.operation_thread is not None and self.operation_thread.isRunning():
             self.status_label.setText("Stopping operation...")
             self.operation_thread.stop_operation()
+            # Disable stop button immediately to prevent multiple clicks
+            self.stop_button.setEnabled(False)
+
+            # Set up a timer to force cleanup if thread doesn't stop gracefully
+            self.stop_timer = QTimer()
+            self.stop_timer.timeout.connect(self._force_stop_cleanup)
+            self.stop_timer.setSingleShot(True)
+            self.stop_timer.start(5000)  # 5 second timeout
+        else:
+            self.status_label.setText("No operation running to stop")
+
+    def _force_stop_cleanup(self):
+        """Force cleanup if thread doesn't stop gracefully."""
+        if self.operation_thread is not None and self.operation_thread.isRunning():
+            self.status_label.setText("Force stopping operation...")
+            self.operation_thread.terminate()  # Force terminate the thread
+            self.operation_thread.wait(1000)  # Wait up to 1 second
+            self.operation_finished("Unknown", False)  # Reset GUI state
+
+        if self.stop_timer is not None:
+            self.stop_timer.stop()
+            self.stop_timer = None
 
     def fill(self):
         """Start fill operation."""
@@ -301,6 +337,19 @@ class PumpControlGUI(QWidget):
     def drain(self):
         """Start drain operation."""
         self.start_operation("Drain")
+
+    def closeEvent(self, event):
+        """Handle GUI close event to ensure proper cleanup."""
+        if self.operation_thread is not None and self.operation_thread.isRunning():
+            self.stop_operation()
+            # Give the thread a moment to stop
+            self.operation_thread.wait(3000)  # Wait up to 3 seconds
+
+        # Ensure pumps are stopped
+        self.pump_dispenser.stop()
+        self.pump_retractor.stop()
+
+        event.accept()
 
 
 def load_config():
@@ -329,12 +378,12 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     # Initialize pumps with config values
-    pump_dispenser = PumpController(
+    pump_dispenser = SimulatedPumpController(
         sn=serial_number, baudrate=baudrate, unit_id=dispenser_unit_id, max_rpm=max_rpm
     )
     pump_dispenser.connect()
 
-    pump_retractor = PumpController(
+    pump_retractor = SimulatedPumpController(
         sn=serial_number, baudrate=baudrate, unit_id=retractor_unit_id, max_rpm=max_rpm
     )
     pump_retractor.set_client(pump_dispenser.client)
