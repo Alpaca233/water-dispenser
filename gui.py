@@ -136,14 +136,15 @@ class PumpOperationThread(QThread):
 
         # Stop pumps
         if self.is_running:
-            self.pump_retractor.stop()
-            self.pump_dispenser.stop()
-            self.operation_completed.emit(self.operation_name, True)
+            self._cleanup_operation(True)
         else:
-            self.pump_retractor.stop()
-            self.pump_dispenser.stop()
-            self.operation_completed.emit(self.operation_name, False)
+            self._cleanup_operation(False)
 
+    def _cleanup_operation(self, success: bool):
+        """Stop both pumps and emit operation_completed signal."""
+        self.pump_retractor.stop()
+        self.pump_dispenser.stop()
+        self.operation_completed.emit(self.operation_name, success)
     def run(self):
         """Main thread execution."""
         self.is_running = True
