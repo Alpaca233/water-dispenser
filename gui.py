@@ -632,12 +632,12 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     # Initialize pumps with config values
-    pump_dispenser = SimulatedPumpController(
+    pump_dispenser = PumpController(
         sn=serial_number, baudrate=baudrate, unit_id=dispenser_unit_id, max_rpm=max_rpm
     )
     pump_dispenser.connect()
 
-    pump_retractor = SimulatedPumpController(
+    pump_retractor = PumpController(
         sn=serial_number, baudrate=baudrate, unit_id=retractor_unit_id, max_rpm=max_rpm
     )
     pump_retractor.set_client(pump_dispenser.client)
